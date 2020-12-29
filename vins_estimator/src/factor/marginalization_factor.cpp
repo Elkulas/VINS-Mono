@@ -191,9 +191,11 @@ void MarginalizationInfo::marginalize()
         }
     }
 
+    // 剩下的维度
     n = pos - m;
 
     //ROS_DEBUG("marginalization, pos: %d, m: %d, n: %d, size: %d", pos, m, n, (int)parameter_block_idx.size());
+    // 把路标点和位姿一起进行marg操作
 
     TicToc t_summing;
     Eigen::MatrixXd A(pos, pos);
@@ -201,6 +203,7 @@ void MarginalizationInfo::marginalize()
     A.setZero();
     b.setZero();
     /*
+    单线程进行构建
     for (auto it : factors)
     {
         for (int i = 0; i < static_cast<int>(it->parameter_blocks.size()); i++)
@@ -227,8 +230,8 @@ void MarginalizationInfo::marginalize()
     ROS_INFO("summing up costs %f ms", t_summing.toc());
     */
     //multi thread
-
-
+    // 四线程构建
+    // 使用四个线程把A和b进行求解
     TicToc t_thread_summing;
     pthread_t tids[NUM_THREADS];
     ThreadsStruct threadsstruct[NUM_THREADS];
@@ -268,10 +271,11 @@ void MarginalizationInfo::marginalize()
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes(Amm);
 
     //ROS_ASSERT_MSG(saes.eigenvalues().minCoeff() >= -1e-4, "min eigenvalue %f", saes.eigenvalues().minCoeff());
-
+    // 求逆
     Eigen::MatrixXd Amm_inv = saes.eigenvectors() * Eigen::VectorXd((saes.eigenvalues().array() > eps).select(saes.eigenvalues().array().inverse(), 0)).asDiagonal() * saes.eigenvectors().transpose();
     //printf("error1: %f\n", (Amm * Amm_inv - Eigen::MatrixXd::Identity(m, m)).sum());
 
+    // 分块然后marg
     Eigen::VectorXd bmm = b.segment(0, m);
     Eigen::MatrixXd Amr = A.block(0, m, m, n);
     Eigen::MatrixXd Arm = A.block(m, 0, n, m);
@@ -280,6 +284,11 @@ void MarginalizationInfo::marginalize()
     A = Arr - Arm * Amm_inv * Amr;
     b = brr - Arm * Amm_inv * bmm;
 
+    // 先验残差
+    // 用Ab反解得到应用于ceres的部分
+    // 把A分成J
+    // 把b反解得到残差的大小
+    // 自己写代码时候就可以自己去维护Ab矩阵
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes2(A);
     Eigen::VectorXd S = Eigen::VectorXd((saes2.eigenvalues().array() > eps).select(saes2.eigenvalues().array(), 0));
     Eigen::VectorXd S_inv = Eigen::VectorXd((saes2.eigenvalues().array() > eps).select(saes2.eigenvalues().array().inverse(), 0));

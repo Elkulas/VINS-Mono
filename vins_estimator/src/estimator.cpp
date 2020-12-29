@@ -529,6 +529,7 @@ void Estimator::vector2double()
 
 void Estimator::double2vector()
 {
+    // 记住了优化以前的参数
     Vector3d origin_R0 = Utility::R2ypr(Rs[0]);
     Vector3d origin_P0 = Ps[0];
 
@@ -538,10 +539,14 @@ void Estimator::double2vector()
         origin_P0 = last_P0;
         failure_occur = 0;
     }
+    // 优化以后的参数
     Vector3d origin_R00 = Utility::R2ypr(Quaterniond(para_Pose[0][6],
                                                       para_Pose[0][3],
                                                       para_Pose[0][4],
                                                       para_Pose[0][5]).toRotationMatrix());
+    // 获得旋转平移的差
+    // 也就是获得一次优化之后整个轨迹在零空间移动变化了多少
+    // 然后整体作用到整个轨迹上
     double y_diff = origin_R0.x() - origin_R00.x();
     //TODO
     Matrix3d rot_diff = Utility::ypr2R(Vector3d(y_diff, 0, 0));
@@ -666,13 +671,16 @@ bool Estimator::failureDetection()
     return false;
 }
 
-
+// 最重要
 void Estimator::optimization()
 {
+    // 定义problem.
     ceres::Problem problem;
+    // 定义损失核函数
     ceres::LossFunction *loss_function;
     //loss_function = new ceres::HuberLoss(1.0);
     loss_function = new ceres::CauchyLoss(1.0);
+    // 告诉problem有哪些顶点
     for (int i = 0; i < WINDOW_SIZE + 1; i++)
     {
         ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
@@ -699,7 +707,7 @@ void Estimator::optimization()
 
     TicToc t_whole, t_prepare;
     vector2double();
-
+    // 判断是否拥有先验信息
     if (last_marginalization_info)
     {
         // construct new marginlization_factor
@@ -707,7 +715,7 @@ void Estimator::optimization()
         problem.AddResidualBlock(marginalization_factor, NULL,
                                  last_marginalization_parameter_blocks);
     }
-
+    // imu残差
     for (int i = 0; i < WINDOW_SIZE; i++)
     {
         int j = i + 1;
@@ -716,6 +724,7 @@ void Estimator::optimization()
         IMUFactor* imu_factor = new IMUFactor(pre_integrations[j]);
         problem.AddResidualBlock(imu_factor, NULL, para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]);
     }
+    // 视觉的
     int f_m_cnt = 0;
     int feature_index = -1;
     for (auto &it_per_id : f_manager.feature)
@@ -799,7 +808,7 @@ void Estimator::optimization()
         }
 
     }
-
+    // 用ceres求解
     ceres::Solver::Options options;
 
     options.linear_solver_type = ceres::DENSE_SCHUR;
@@ -819,15 +828,22 @@ void Estimator::optimization()
     //cout << summary.BriefReport() << endl;
     ROS_DEBUG("Iterations : %d", static_cast<int>(summary.iterations.size()));
     ROS_DEBUG("solver costs: %f", t_solver.toc());
-
+    
+    // 这个操作有趣
+    // 就是固定头的作用
+    // 解决了零空间的问题
     double2vector();
 
+    // two way marg策略
     TicToc t_whole_marginalization;
+    // marg掉最老的帧
     if (marginalization_flag == MARGIN_OLD)
     {
         MarginalizationInfo *marginalization_info = new MarginalizationInfo();
         vector2double();
-
+        //marg含有先验信息矩阵的状态
+        // 要被marg掉的帧含有的先验信息
+        // 添加到marginfo
         if (last_marginalization_info)
         {
             vector<int> drop_set;
@@ -845,8 +861,10 @@ void Estimator::optimization()
 
             marginalization_info->addResidualBlockInfo(residual_block_info);
         }
-
+        // 要被marg掉的帧观测到的imu信息
+        // 添加到marginfo
         {
+            // imu残差项
             if (pre_integrations[1]->sum_dt < 10.0)
             {
                 IMUFactor* imu_factor = new IMUFactor(pre_integrations[1]);
@@ -856,7 +874,8 @@ void Estimator::optimization()
                 marginalization_info->addResidualBlockInfo(residual_block_info);
             }
         }
-
+        // 要被marg掉的帧观测到的视觉信息
+        // 添加到marginfo
         {
             int feature_index = -1;
             for (auto &it_per_id : f_manager.feature)
@@ -903,10 +922,13 @@ void Estimator::optimization()
         }
 
         TicToc t_pre_margin;
+        // 统计各个块的维度
+        // 做准备
         marginalization_info->preMarginalize();
         ROS_DEBUG("pre marginalization %f ms", t_pre_margin.toc());
         
         TicToc t_margin;
+        // 开始marg
         marginalization_info->marginalize();
         ROS_DEBUG("marginalization %f ms", t_margin.toc());
 
@@ -930,6 +952,9 @@ void Estimator::optimization()
         last_marginalization_parameter_blocks = parameter_blocks;
         
     }
+    // 如果不是丢掉最老的帧
+    // 如果是marg最新的这一帧
+    // 把视觉特征直接扔掉
     else
     {
         if (last_marginalization_info &&
@@ -938,6 +963,9 @@ void Estimator::optimization()
 
             MarginalizationInfo *marginalization_info = new MarginalizationInfo();
             vector2double();
+            // 这边需要保存该帧内存在的之前的先验信息继续进行一个传递
+            // 倒数第二帧虽然视觉信息全部丢掉,但是该帧上其他帧所给的先验信息将继续得到保留
+            // 如果有先验信息
             if (last_marginalization_info)
             {
                 vector<int> drop_set;
